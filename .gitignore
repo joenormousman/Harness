@@ -7,3 +7,7 @@ deployment-*.env
 *.pem
 npm-debug.log
 yarn-error.log
+
+# dep-resolver output artifacts
+package-expanded.xml
+rationale.json

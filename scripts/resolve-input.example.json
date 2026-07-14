@@ -1,0 +1,9 @@
+{
+  "apiVersion": "61.0",
+  "seeds": [
+    {
+      "type": "CustomField",
+      "name": "Release_Signal__c.Status__c"
+    }
+  ]
+}
