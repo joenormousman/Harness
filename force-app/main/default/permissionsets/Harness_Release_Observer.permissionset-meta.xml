@@ -4,7 +4,26 @@
         <apexClass>HarnessReleaseHealth</apexClass>
         <enabled>true</enabled>
     </classAccesses>
-    <description>Grants read access to the release health check used by the Harness Salesforce demo.</description>
+    <description>Grants read access to the release health check and the Release Signal object used by the Harness Salesforce demo.</description>
+    <fieldPermissions>
+        <editable>false</editable>
+        <field>Release_Signal__c.Status__c</field>
+        <readable>true</readable>
+    </fieldPermissions>
+    <fieldPermissions>
+        <editable>false</editable>
+        <field>Release_Signal__c.Last_Run__c</field>
+        <readable>true</readable>
+    </fieldPermissions>
     <hasActivationRequired>false</hasActivationRequired>
     <label>Harness Release Observer</label>
+    <objectPermissions>
+        <allowCreate>false</allowCreate>
+        <allowDelete>false</allowDelete>
+        <allowEdit>false</allowEdit>
+        <allowRead>true</allowRead>
+        <modifyAllRecords>false</modifyAllRecords>
+        <object>Release_Signal__c</object>
+        <viewAllRecords>true</viewAllRecords>
+    </objectPermissions>
 </PermissionSet>

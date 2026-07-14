@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ValidationRule xmlns="http://soap.sforce.com/2006/04/metadata">
+    <fullName>Failed_Requires_Last_Run</fullName>
+    <active>true</active>
+    <description>If Status is set to Failed, the Last Run timestamp must be populated so release managers can trace the failure.</description>
+    <errorConditionFormula>ISPICKVAL(Status__c, &quot;Failed&quot;) &amp;&amp; ISBLANK(Last_Run__c)</errorConditionFormula>
+    <errorDisplayField>Last_Run__c</errorDisplayField>
+    <errorMessage>Last Run must be populated when Status is Failed.</errorMessage>
+</ValidationRule>

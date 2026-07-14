@@ -6,6 +6,19 @@
         <name>ApexClass</name>
     </types>
     <types>
+        <members>Release_Signal__c</members>
+        <name>CustomObject</name>
+    </types>
+    <types>
+        <members>Release_Signal__c.Status__c</members>
+        <members>Release_Signal__c.Last_Run__c</members>
+        <name>CustomField</name>
+    </types>
+    <types>
+        <members>Release_Signal__c.Failed_Requires_Last_Run</members>
+        <name>ValidationRule</name>
+    </types>
+    <types>
         <members>Harness_Release_Observer</members>
         <name>PermissionSet</name>
     </types>
