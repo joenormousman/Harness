@@ -1,0 +1,9 @@
+.sf/
+.sfdx/
+node_modules/
+deployment-*.json
+deployment-*.env
+*.key
+*.pem
+npm-debug.log
+yarn-error.log

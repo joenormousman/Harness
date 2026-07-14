@@ -1,0 +1,13 @@
+{
+  "name": "harness-salesforce-release-demo",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Technical demo of a governed Salesforce DX release pipeline using Harness.",
+  "scripts": {
+    "check": "node scripts/check-salesforce-project.mjs",
+    "extract:deploy": "node scripts/extract-salesforce-deploy-result.mjs deployment-validation.json"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

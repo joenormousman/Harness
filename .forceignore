@@ -1,0 +1,13 @@
+.sf
+.sfdx
+.localdevserver
+.vscode
+.idea
+node_modules
+npm-debug.log
+yarn-error.log
+deployment-*.json
+deployment-*.env
+server.key
+*.pem
+*.key
