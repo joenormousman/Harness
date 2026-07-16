@@ -4,6 +4,7 @@ set -euo pipefail
 : "${TARGET_ORG:?Set TARGET_ORG to a Salesforce org alias or username.}"
 
 SOURCE_DIR="${SOURCE_DIR:-force-app}"
+MANIFEST_PATH="${MANIFEST_PATH:-}"
 TEST_LEVEL="${TEST_LEVEL:-RunLocalTests}"
 WAIT_MINUTES="${WAIT_MINUTES:-60}"
 DEPLOY_MODE="${DEPLOY_MODE:-standard}"
@@ -15,6 +16,13 @@ if [[ "$DEPLOY_MODE" == "quick" ]]; then
   sf project deploy quick \
     --job-id "$VALIDATION_JOB_ID" \
     --target-org "$TARGET_ORG" \
+    --wait "$WAIT_MINUTES" \
+    --json > "$REPORT_PATH"
+elif [[ -n "$MANIFEST_PATH" ]]; then
+  sf project deploy start \
+    --target-org "$TARGET_ORG" \
+    --manifest "$MANIFEST_PATH" \
+    --test-level "$TEST_LEVEL" \
     --wait "$WAIT_MINUTES" \
     --json > "$REPORT_PATH"
 else

@@ -1,0 +1,168 @@
+pipeline:
+  name: Salesforce Feature Package Deploy
+  identifier: Salesforce_Feature_Package_Deploy
+  projectIdentifier: default_project
+  orgIdentifier: default
+  description: |-
+    Feature-independent Salesforce metadata deployment. Reads a seed manifest,
+    walks the metadata dependency graph (forward + inverse references), emits
+    an expanded package.xml, and deploys only the resolved subset to the target
+    org. This is the intelligence layer that Copado, Gearset, and Flosum sell
+    as their differentiator — surfaced here as a single Harness pipeline stage.
+  tags:
+    system: salesforce
+    demo: feature-independent
+    thesis: dep-graph
+  properties:
+    ci:
+      codebase:
+        connectorRef: <+input>
+        repoName: <+input>
+        build: <+input>
+  variables:
+    - name: sourceDir
+      type: String
+      description: Salesforce DX package directory the resolver walks.
+      required: true
+      value: force-app
+    - name: sfCliVersion
+      type: String
+      description: Pinned Salesforce CLI version for reproducible runs.
+      required: true
+      value: 2.143.6
+    - name: targetInstanceUrl
+      type: String
+      description: Login URL for the deployment target org.
+      required: true
+      value: https://login.salesforce.com
+    - name: manifestPath
+      type: String
+      description: |-
+        Path (relative to repo root) to a seed-manifest JSON file listing the
+        metadata items the user wants to deploy. The resolver expands this into
+        a full package.xml by walking forward and inverse references.
+      required: true
+      value: scripts/resolve-input.example.json
+    - name: expandedPackagePath
+      type: String
+      description: Where the resolver writes the expanded package.xml.
+      required: true
+      value: package-expanded.xml
+    - name: rationalePath
+      type: String
+      description: Where the resolver writes the per-item rationale trail (JSON).
+      required: true
+      value: rationale.json
+    - name: apiVersion
+      type: String
+      description: Salesforce API version used in the emitted package.xml.
+      required: true
+      value: "61.0"
+  stages:
+    - stage:
+        name: Resolve and Deploy Feature Package
+        identifier: Resolve_And_Deploy_Feature_Package
+        description: |-
+          Single-stage pipeline. Installs the SF CLI, JWT-authenticates to the
+          target org, runs the metadata dep-resolver against the seed manifest,
+          then deploys the expanded package.xml (not force-app/) so only the
+          resolved subset ships.
+        type: CI
+        spec:
+          cloneCodebase: true
+          platform:
+            os: Linux
+            arch: Amd64
+          runtime:
+            type: Cloud
+            spec: {}
+          execution:
+            steps:
+              - step:
+                  type: Run
+                  name: Install Salesforce CLI
+                  identifier: Install_Salesforce_CLI
+                  spec:
+                    shell: Bash
+                    envVariables:
+                      SF_CLI_VERSION: <+pipeline.variables.sfCliVersion>
+                    command: |-
+                      bash scripts/install-salesforce-cli.sh
+              - step:
+                  type: Run
+                  name: Check Salesforce Project
+                  identifier: Check_Salesforce_Project
+                  spec:
+                    shell: Bash
+                    command: |-
+                      node scripts/check-salesforce-project.mjs
+              - step:
+                  type: Run
+                  name: Authenticate Target Org
+                  identifier: Auth_Target_Org
+                  spec:
+                    shell: Bash
+                    envVariables:
+                      SF_CLIENT_ID: <+secrets.getValue("sf_sandbox_client_id")>
+                      SF_USERNAME: <+secrets.getValue("sf_sandbox_username")>
+                      SF_JWT_KEY_BASE64: <+secrets.getValue("sf_sandbox_jwt_key_b64")>
+                      SF_INSTANCE_URL: <+pipeline.variables.targetInstanceUrl>
+                      SF_ORG_ALIAS: feature-target
+                    command: |-
+                      bash scripts/auth-salesforce-jwt.sh
+              - step:
+                  type: Run
+                  name: Resolve Dependency Graph
+                  identifier: Resolve_Dependency_Graph
+                  spec:
+                    shell: Bash
+                    envVariables:
+                      SOURCE_DIR: <+pipeline.variables.sourceDir>
+                      MANIFEST_PATH: <+pipeline.variables.manifestPath>
+                      EXPANDED_PACKAGE_PATH: <+pipeline.variables.expandedPackagePath>
+                      RATIONALE_PATH: <+pipeline.variables.rationalePath>
+                      API_VERSION: <+pipeline.variables.apiVersion>
+                    command: |-
+                      echo "=== Seed manifest ==="
+                      cat "$MANIFEST_PATH"
+                      echo ""
+                      echo "=== Running dep-resolver ==="
+                      python3 scripts/resolve-dependencies.py \
+                        --source-dir "$SOURCE_DIR" \
+                        --input "$MANIFEST_PATH" \
+                        --output "$EXPANDED_PACKAGE_PATH" \
+                        --rationale "$RATIONALE_PATH" \
+                        --api-version "$API_VERSION"
+                      echo ""
+                      echo "=== Expanded package.xml ==="
+                      cat "$EXPANDED_PACKAGE_PATH"
+                      echo ""
+                      echo "=== Rationale (why each item was included) ==="
+                      cat "$RATIONALE_PATH"
+              - step:
+                  type: Run
+                  name: Deploy Resolved Package
+                  identifier: Deploy_Resolved_Package
+                  spec:
+                    shell: Bash
+                    envVariables:
+                      TARGET_ORG: feature-target
+                      MANIFEST_PATH: <+pipeline.variables.expandedPackagePath>
+                      TEST_LEVEL: RunLocalTests
+                      WAIT_MINUTES: "60"
+                      DEPLOY_MODE: standard
+                    command: |-
+                      bash scripts/deploy-metadata.sh
+              - step:
+                  type: Run
+                  name: Run Apex Smoke Test
+                  identifier: Run_Apex_Smoke_Test
+                  spec:
+                    shell: Bash
+                    envVariables:
+                      TARGET_ORG: feature-target
+                      TEST_CLASS: HarnessReleaseHealthTest
+                      WAIT_MINUTES: "20"
+                    command: |-
+                      bash scripts/run-apex-smoke-test.sh
+        tags: {}
