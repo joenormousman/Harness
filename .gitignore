@@ -11,3 +11,8 @@ yarn-error.log
 # dep-resolver output artifacts
 package-expanded.xml
 rationale.json
+
+# Playwright MCP artifacts (from setup automation runs)
+.playwright-mcp/
+sf-dev-login.png
+*.playwright-mcp.png

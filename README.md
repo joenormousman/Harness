@@ -6,14 +6,16 @@ It shows how Harness can make a Salesforce ecosystem better supported by giving 
 
 ## What The Demo Builds
 
-The demo has four parts:
+The demo has six parts:
 
-- Salesforce DX metadata in `force-app/`.
-- Reusable CI scripts in `scripts/`.
-- Harness pipeline-as-code in `.harness/salesforce-dx-governed-release.yaml`.
+- Salesforce DX metadata in `force-app/` — Apex + PermissionSet + `Release_Signal__c` object with real cross-dependencies (custom field → validation rule → permission set).
+- Reusable CI scripts in `scripts/` (7 shell + 2 Node helpers + 1 Python dep-resolver).
+- **Governed release pipeline** at `.harness/salesforce-dx-governed-release.yaml` — 5 stages, JWT-authenticated, approval-gated quick-deploy pattern.
+- **Feature package deploy pipeline** at `.harness/feature-package-deploy.yaml` — single-stage pipeline that runs the metadata dep-resolver against a seed manifest, expands it to a full package.xml, and deploys only the resolved subset. This is the interview differentiator.
+- Setup runbooks in `docs/` (Connected App / External Client App setup, 7-phase pipeline setup, dep-graph architecture, and a 1-page product brief).
 - Setup and interview notes in this README.
 
-The sample metadata is intentionally small: one Apex health class, one Apex test, and one permission set. The pipeline is the real point.
+The two pipelines together answer *"what does Harness Salesforce support look like today, and what does the missing intelligence layer look like once it's built?"*
 
 ## Pipeline Flow
 
