@@ -14,21 +14,30 @@ Three pipelines. Know what each one is and be able to open it live.
 
 ### 1. `DevOpsForce Site` — YOUR K8S CI/CD LAB PIPELINE (green as of today)
 
-**What it does:** Builds a static nginx site from the `joenormousman/DevOpsForce` GitHub repo, pushes the image to DockerHub, deploys it to your GKE cluster using blue/green deployment.
+**What it does:** Builds a static nginx site from the `joenormousman/DevOpsForce` GitHub repo, pushes the image to DockerHub, deploys it to your GKE cluster using Harness's blue/green deployment strategy.
+
+**How the app is put together (know this cold — every layer is defensible):**
+- **Container image**: base is `nginxinc/nginx-unprivileged:1.27-alpine` — runs as non-root nginx by default. Dockerfile briefly does `USER root` to `sed` the `BUILD_TAG` (the pipeline run number) into `index.html` — that's how you can visually confirm which build is serving traffic — then drops back to `USER nginx`.
+- **nginx config**: listens on **port 8080** (not 80) because unprivileged containers can't bind to ports below 1024. `/healthz` returns `200 "ok\n"`, defined in `nginx.conf`. `/` uses `try_files` fallback to `index.html` (SPA-style).
+- **Kubernetes Service**: maps `servicePort: 80` → `serviceTargetPort: 8080`. External users hit 80; nginx serves on 8080.
+- **Deployment**: 2 replicas, `RollingUpdate` strategy *within each color* (`maxSurge: 1`, `maxUnavailable: 0`) — this is the intra-color rollout mechanism. Blue/green is the higher-level pattern across two Deployment resources.
+- **Health probes**: both liveness and readiness hit `/healthz` on port 8080. Readiness fires faster (initialDelaySeconds 3, periodSeconds 5) so the service pulls unhealthy pods out of rotation before liveness kills them.
+- **Resources**: 50m CPU / 64Mi memory requests, 200m / 128Mi limits — tiny; this is a static-content workload.
+- **Pod security**: `runAsNonRoot: true`, `runAsUser: 101`, `runAsGroup: 101` in the pod template's `securityContext` (fixed today — see Failure 2 below).
 
 **Stages:**
-- **Build**
-  - **Sanity Check Site** — verifies `site/index.html` exists and contains "DevOpsForce" (`alpine:3.20` image)
-  - **Build and Push Image** — uses Harness's native `BuildAndPushDockerRegistry` step to build the Dockerfile and push to `joenormous/devopsforce-site:<pipelineRunNumber>` and `:latest` on DockerHub
-- **Deploy** (`Deployment` stage type, not CI)
-  - Service: `devopsforce_site` (Harness Service definition pulls manifests from `joenormousman/DevOpsForce` repo, artifact from DockerHub)
-  - Environment: `Prod` with infrastructure `devopsforce` (targets the `devopsforce` namespace on your GKE cluster)
-  - **Blue Green Deploy** — Harness's `K8sBlueGreenDeploy` step spins up a new "blue" deployment alongside the current "green"
-  - **Verify Stage Color** — invokes your existing **`K8s_HTTP_Health_Check` v1 step template** (this is your bonus lab item — templatization already in production) — hits `http://devopsforce-site-stage.devopsforce.svc.cluster.local/healthz` and expects 200
-  - **Swap Primary With Stage** — `K8sBGSwapServices` — swaps the service selectors so the new blue becomes primary
-  - **Rollback** — if any step fails, `K8sBGSwapServices` swaps back to the previous version (defined in `rollbackSteps`)
+- **Build** (CI stage on `KubernetesDirect` infrastructure, `gke_devopsforce` connector, `harness-build` namespace)
+  - **Sanity Check Site** — runs in `alpine:3.20`, verifies `site/index.html` exists and contains "DevOpsForce". Fast-fails if the repo state is broken before spending time on the image build.
+  - **Build and Push Image** — Harness's native `BuildAndPushDockerRegistry` step. Builds the `Dockerfile` in the repo root, passes `BUILD_TAG=<+pipeline.sequenceId>` as a build arg, tags the image `joenormous/devopsforce-site:<sequenceId>` AND `:latest`, pushes both to DockerHub via the `DockerHub` connector.
+- **Deploy** (Harness `Deployment` stage type, `deploymentType: Kubernetes`)
+  - **Service**: `devopsforce_site` (Kubernetes service definition). Artifact source is DockerHub, `imagePath: joenormous/devopsforce-site`, `tag: <+pipeline.sequenceId>` — locks the deploy to the exact image the Build stage just pushed.
+  - **Environment**: `Prod`, infrastructure `devopsforce` (targets the `devopsforce` namespace on your GKE cluster).
+  - **Blue Green Deploy** — `K8sBlueGreenDeploy` step. Deploys the new version as a "stage" deployment (labeled with a color, e.g. `blue`) alongside the currently-serving "primary" deployment (labeled the other color). Two services exist: one selects primary, one selects stage. Real user traffic is still hitting primary — the new version is fully deployed but invisible to users.
+  - **Verify Stage Color** — invokes your **`K8s_HTTP_Health_Check` v1 step template** (this is your bonus lab item — templatization already in production) — hits `http://devopsforce-site-stage.devopsforce.svc.cluster.local/healthz` (the stage service, inside the cluster) and expects HTTP 200. If it fails, the pipeline fails BEFORE any real user traffic touches the new version.
+  - **Swap Primary With Stage** — `K8sBGSwapServices`. Swaps the service selectors: the service that was pointing at primary now points at the new deployment, and vice versa. This is the atomic traffic cutover — no half-and-half state, no rolling window. One second real users are on the old version, next second they're on the new.
+  - **Rollback** (defined in `rollbackSteps`): if any step in the stage fails, `K8sBGSwapServices` swaps back — instant rollback, no re-deploy required. `failureStrategies: onFailure: AllErrors -> StageRollback` wires this up.
 
-**What the fix today was:** The K8s deployment.yaml manifest had `runAsNonRoot: true` but was missing `runAsUser: 101`. GKE's Pod Security admission requires a numeric UID to verify non-root; the base image (`nginxinc/nginx-unprivileged:1.27-alpine`) uses the named user "nginx" internally which K8s can't resolve at admission time. Added 4 lines to the deployment.yaml (`runAsUser: 101`, `runAsGroup: 101`, plus a comment), pushed to `joenormousman/DevOpsForce`, re-ran the pipeline — green.
+**What the fix today was:** The K8s deployment.yaml manifest had `runAsNonRoot: true` but was missing `runAsUser: 101`. GKE's Pod Security admission requires a numeric UID to verify non-root; the base image (`nginxinc/nginx-unprivileged:1.27-alpine`) declares its user as the string "nginx" internally, which K8s admission can't resolve without running the container. Added 4 lines to the pod-template `securityContext` (`runAsUser: 101`, `runAsGroup: 101`, plus a comment explaining why), pushed to `joenormousman/DevOpsForce`, re-ran the pipeline — green.
 
 ### 2. `Salesforce DX Governed Release` — YOUR SALESFORCE DIFFERENTIATOR
 
@@ -41,7 +50,14 @@ Three pipelines. Know what each one is and be able to open it live.
 - **Approve Production** — human approval gate. The approval message embeds the validation status, job ID, and Apex test counts from the previous stage using Harness expressions like `<+pipeline.stages.Validate_Production.spec.execution.steps.Production_Validation.output.outputVariables.VALIDATION_JOB_ID>`.
 - **Deploy Production** — `sf project deploy quick` against the pre-validated job ID. Salesforce accepts a quick-deploy if the validation is <=10 days old, skipping test re-runs.
 
-**Current state:** Imported to Harness, retargeted to your `gke_devopsforce` delegate. **Auth fails on `invalid assertion`** because the JWT cert was regenerated (v2 in scratchpad) and the new base64 isn't in the Harness secrets yet, and the new cert isn't uploaded to the SF ECAs yet. **If asked to run it live**, say: "the pipeline is deployed and structurally proven; the cert was regenerated as part of hardening and I'd need to re-upload it to both orgs and update the Harness secrets to run — 15 minutes of setup."
+**Current state — be precise if asked:**
+- Pipeline YAML is imported to Harness and visible in the UI (5 stages render correctly).
+- Retargeted from `runtime.type: Cloud` to `KubernetesDirect` on the `gke_devopsforce` delegate — same infrastructure DevOpsForce Site runs on.
+- **Never got a green run.** Hit `invalid assertion` at the JWT auth step during Wednesday's run attempt — that's the Salesforce JWT bearer flow's "signature verification failed" error. The v1 JWT cert (uploaded to both ECAs and stored as base64 in Harness secrets) either has a subtle mismatch or the ECAs are missing the "Admin approved users are pre-authorized" + System Administrator profile assignment that JWT bearer requires.
+- Regenerated a v2 cert during Thursday debugging with a new keypair + fresh base64 + integrity-verified roundtrip; it's sitting in scratchpad but **never propagated to SF or Harness secrets** (would need re-uploading the new cert to both ECAs + updating 3 Harness secrets — ~15 min of setup).
+- Also added JWT diagnostics to `scripts/auth-salesforce-jwt.sh` that log the derived public-key SHA256 for future debugging.
+
+**If asked to run it live in the interview:** *"The pipeline is deployed and structurally proven end-to-end — I retargeted it to my delegate, the Salesforce CLI installs correctly to the workspace, my helper script sources the workspace-scoped PATH. Auth is where it stops today: I hit an `invalid assertion` from JWT bearer, regenerated the cert to eliminate any doubt on the crypto side, but I haven't yet propagated the new cert to both orgs and updated the Harness secrets — that's about 15 minutes of setup. What I can show you live right now is the metadata dependency resolver running locally against the same repo the pipeline would deploy — that's the intelligence layer that's the actual product thesis."*
 
 ### 3. `Salesforce Feature Package Deploy` — YOUR THESIS DEMO
 
@@ -66,9 +82,11 @@ Three pipelines. Know what each one is and be able to open it live.
 - **If asked "why not just disable `runAsNonRoot`?":** Because running containers as root is a security posture I don't want to normalize. The unprivileged nginx base is already correctly non-root; the issue is only about how K8s verifies that fact. Setting the explicit UID keeps the security posture intact.
 
 ### Blue/Green deployment (over Rolling or Canary)
-- **Why:** For a marketing site with predictable traffic, blue/green gives instant traffic switching + instant rollback via service selector swap. The rollout is atomic — either the new version passes health check and takes 100% traffic, or the old version keeps 100% traffic. No half-and-half state.
+- **Why:** For a marketing site with predictable traffic, blue/green gives instant traffic cutover + instant rollback via service selector swap. The rollout is atomic — either the new version passes health check and takes 100% traffic, or the old version keeps 100% traffic. No half-and-half state, no partial upgrade window where 20% of users see version N and 80% see version N-1.
+- **Sequence (memorize):** Deploy new version as "stage" alongside current "primary" (both are separate K8s Deployment resources, both fully running) → health-check the stage service (in-cluster only, real users never see it) → if healthy, swap service selectors (traffic cutover) → if unhealthy, rollback just doesn't swap; the previous primary keeps serving.
 - **If asked "when would you pick Canary?":** Canary is right for stateful services where you want gradual traffic shift (10% new, 90% old) and metric-based promotion. It's more complex and needs strong observability. Blue/green is right when your app is stateless and you have a good health check — you get faster rollback with less risk.
-- **If asked "when would you pick Rolling?":** Rolling is the default for cost-optimized long-lived deployments where you don't need instant rollback. Slower to deploy, cheaper (no double-capacity moment), but rollback is another rolling update — not instant.
+- **If asked "when would you pick Rolling?":** Rolling is the default for cost-optimized long-lived deployments where you don't need instant rollback. Slower to deploy, cheaper (no double-capacity moment), but rollback is another rolling update — not instant. Note that inside each *color* of a blue/green deploy, the individual Deployment resource still uses a `RollingUpdate` strategy — those are two different layers.
+- **Cost caveat:** Blue/green requires 2× capacity briefly during the deploy window (both colors alive at once). Fine for a 2-replica marketing site; consider carefully for a 200-replica service.
 
 ### Templatization: `K8s_HTTP_Health_Check` step template (your bonus item)
 - **Why:** The health check pattern — "hit an HTTP endpoint, expect a specific status" — repeats across many deployment pipelines. Extracting it as a Harness step template with `HEALTH_URL` and `EXPECTED_STATUS` as runtime inputs means every pipeline that verifies deployments references the same tested implementation. Version pinned at v1 so changes go through explicit template promotion.
@@ -132,7 +150,7 @@ The interviewer will love hearing these — they show you don't just follow tuto
 Rehearse answers to these out loud. The panel WILL ask most of them.
 
 **Q: Walk me through your DevOpsForce pipeline.**
-→ "It's a two-stage CI/CD pipeline. Build stage runs on my GKE delegate, uses Harness's native Docker build-and-push step to build an nginx-based marketing site image, tags it with the pipeline run number, pushes to DockerHub. Deploy stage uses Harness's Kubernetes CD module — service definition pulls manifests from git, artifact from DockerHub, blue/green deploy with a templated HTTP health check between the color swap and traffic cutover. If the health check fails, rollback swaps back automatically. Green today."
+→ "Two-stage pipeline running on my GKE cluster via a self-hosted Harness Delegate in the `harness-build` namespace. Build stage: sanity-checks the repo, then uses Harness's native Docker build-and-push step to build a nginx-unprivileged image, tags it with the pipeline sequence ID and `latest`, pushes to DockerHub. Deploy stage: Harness Kubernetes CD module. Service definition pulls manifests from the DevOpsForce git repo and the just-built image from DockerHub. Blue/green deploy — spins up the new version as a stage deployment alongside the currently-serving primary; both are live K8s Deployments but only primary is receiving user traffic. Then a step template does an HTTP health check against the stage service inside the cluster. If that passes, `K8sBGSwapServices` swaps the service selectors — atomic traffic cutover to the new version. If anything failed, `failureStrategies.onFailure: StageRollback` kicks in and the rollback step swaps back — no re-deploy needed. Nginx-unprivileged runs as UID 101 on port 8080 because unprivileged containers can't bind to <1024; the service maps 80→8080. Green today."
 
 **Q: Why blue/green vs canary vs rolling?**
 → (See Part 2 above — memorize the tradeoffs)
@@ -163,7 +181,8 @@ Rehearse answers to these out loud. The panel WILL ask most of them.
 → "All Salesforce auth material is stored in Harness Secrets in the `default_project`: 9 secrets total — client_id, username, base64-encoded JWT private key, one triple per role (validation/sandbox/prod). The pipeline injects them into steps via `<+secrets.getValue("...")>`. Private key is base64-encoded because Salesforce JWT auth needs the PEM as a file, but I want it stored as a text secret not a file secret — so the pipeline decodes at runtime into a workspace-local file at `.sf/ci/*.server.key` with chmod 600."
 
 **Q: Show me the pipeline running.**
-→ Run DevOpsForce Site — it's green. If they ask about SF, be honest: "I hit a JWT cert regeneration during hardening this week and I'd need 15 minutes to re-upload the cert to both orgs and update the Harness secrets before it runs. Let me instead show you the dep-resolver running locally against the same repo the pipeline would deploy — that's the intelligence layer that's the actual product thesis." Then run `bash scripts/run-resolver-demo.sh` — 1 seed → 5 items + rationale trail.
+→ **Run DevOpsForce Site live** — it's green today, whole thing takes ~3 min. Point out during the run: the sanity check gating, the Docker build+push, the blue/green stage deploy, the health check against the in-cluster stage service, the swap, and if you refresh the site (once it's exposed via ingress or port-forward) you see the new BUILD_TAG stamped into `index.html` — that's your visible proof the swap moved traffic to the new version.
+→ **If asked about Salesforce**, be honest: *"The Salesforce pipeline is imported and structurally proven — I retargeted it to the same delegate that runs DevOpsForce. It fails at JWT bearer auth today: I hit `invalid assertion` and regenerated the cert to eliminate crypto doubt, but I haven't yet propagated the new cert to both SF orgs and updated the Harness secrets. About 15 min of setup. What I can show you live right now is the metadata dependency resolver running locally against the same repo the pipeline would deploy — that's the intelligence layer that's the actual product thesis."* Then run `bash scripts/run-resolver-demo.sh` — 1 seed → 5 items + rationale trail.
 
 ---
 
