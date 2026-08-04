@@ -89,7 +89,7 @@ pipeline:
                   identifier: Install_Salesforce_CLI
                   spec:
                     connectorRef: DockerHub
-                    image: node:20-slim
+                    image: node:22-slim
                     shell: Bash
                     envVariables:
                       SF_CLI_VERSION: <+pipeline.variables.sfCliVersion>
@@ -100,7 +100,7 @@ pipeline:
                   identifier: Check_Salesforce_Project
                   spec:
                     connectorRef: DockerHub
-                    image: node:20-slim
+                    image: node:22-slim
                     shell: Bash
                     command: node scripts/check-salesforce-project.mjs
               - step:
@@ -109,7 +109,7 @@ pipeline:
                   identifier: Auth_Target_Org
                   spec:
                     connectorRef: DockerHub
-                    image: node:20-slim
+                    image: node:22-slim
                     shell: Bash
                     envVariables:
                       SF_CLIENT_ID: <+secrets.getValue("sf_sandbox_client_id")>
@@ -157,7 +157,7 @@ pipeline:
                   identifier: Deploy_Resolved_Package
                   spec:
                     connectorRef: DockerHub
-                    image: node:20-slim
+                    image: node:22-slim
                     shell: Bash
                     envVariables:
                       TARGET_ORG: feature-target
@@ -174,7 +174,7 @@ pipeline:
                   identifier: Run_Apex_Smoke_Test
                   spec:
                     connectorRef: DockerHub
-                    image: node:20-slim
+                    image: node:22-slim
                     shell: Bash
                     envVariables:
                       TARGET_ORG: feature-target
