@@ -1,8 +1,16 @@
 # Pipeline Build — Findings & Lessons Learned
 
-This document captures the surprises, blockers, and non-obvious decisions from building the two Salesforce pipelines and the metadata dep-resolver in this repo. Written contemporaneously — every finding here is something the reference documentation either doesn't mention, mentions in the wrong place, or misrepresents.
+This document captures the surprises, blockers, and non-obvious decisions from building three pipelines in this repo:
 
-**Timeframe:** Two working days ahead of the Harness Senior Implementation Engineer interview (2026-07-17). Built by one engineer against fresh accounts on both platforms.
+1. **DevOpsForce Site** — a Kubernetes CI/CD pipeline built following the Harness lab tutorial (Docker build+push → blue/green deploy to GKE). **Runs green end-to-end.**
+2. **Salesforce DX Governed Release** — a 5-stage governed Salesforce release pipeline (validate → sandbox → validate prod → approval → quick-deploy). Imported to Harness, structurally complete, JWT auth debugging outstanding.
+3. **Salesforce Feature Package Deploy** — dep-resolver as a Harness pipeline stage. YAML committed to git; resolver runs green locally.
+
+Plus a ~350-line Python metadata dependency-resolver (`scripts/resolve-dependencies.py`) that's the interview's product-thesis differentiator.
+
+Written contemporaneously — every finding here is something the reference documentation either doesn't mention, mentions in the wrong place, or misrepresents.
+
+**Timeframe:** Three working days ahead of the Harness Senior Implementation Engineer interview (2026-07-17). Built by one engineer against a Harness Free-tier account, a GKE cluster with a self-hosted Delegate, and two Salesforce Developer Editions.
 
 **Bias:** These findings are honest, including the ones that make Harness or Salesforce look bad — because the interview panel will spot glossing, and a truthful implementation report lands stronger than a marketing gloss.
 
@@ -103,9 +111,15 @@ Free-tier accounts today have three real options for Cloud runtime:
 2. **Self-hosted Delegate** — install Harness Delegate on your own Docker host, K8s cluster, or cloud VM. Bypasses the CC gate entirely. Setup: ~30-45 min for a fresh cloud VM install.
 3. **Skip Cloud runtime entirely** — pipelines exist and are visible in the UI, but never execute end-to-end.
 
+### What we actually did
+
+Pivoted to option 2. Retargeted both Salesforce pipelines from `runtime.type: Cloud` to `KubernetesDirect` infrastructure using the existing `gke_devopsforce` delegate already installed on the GKE cluster from the DevOpsForce lab work. Same delegate that runs the DevOpsForce Site pipeline in production. **The DevOpsForce Site pipeline runs green with no CC gate involvement** — delegate-executed pipelines don't consume Harness Cloud credits.
+
+This ended up being the correct posture anyway. Enterprise Harness customers overwhelmingly run delegates (they need to reach private resources like Salesforce sandboxes behind IP allowlists), not Cloud runtime. The Free-tier CC gate ended up pushing us to the more enterprise-realistic architecture.
+
 ### Product observation
 
-Harness's Free tier positioning is confused. It advertises Cloud Credits but doesn't let you spend them without a sales conversation. That's a bad first-impression for anyone evaluating Harness for a personal project or a POC — the exact segment that produces internal champions who later drive enterprise deals. **Fixing this is a small-scope, high-leverage product change.**
+Harness's Free tier positioning is confused. It advertises Cloud Credits but doesn't let you spend them without a sales conversation. That's a bad first-impression for anyone evaluating Harness for a personal project or a POC — the exact segment that produces internal champions who later drive enterprise deals. **Fixing this is a small-scope, high-leverage product change.** In the meantime, the docs should surface the delegate path as the primary self-serve option for evaluators — right now delegate setup reads as an advanced-user path in the tutorials, when it's actually the *only* self-serve path for real pipeline execution today.
 
 ---
 
@@ -283,6 +297,10 @@ wsl --status
 ### Interview relevance
 
 This is the exact class of blocker enterprise customers hit when trying to run local delegates. **A cloud-VM-based delegate onboarding path removes this friction entirely** — Harness could ship a one-command "spin up a delegate on our free tier compute for you" experience. Would substantially lower the first-run friction for POC customers.
+
+### What we actually did
+
+Didn't touch the BIOS. Discovered mid-week that the Harness account already had a healthy `gke_devopsforce` delegate running on a GKE cluster from prior work. Retargeted every pipeline to that delegate instead. Local Docker Delegate would have been genuinely useful for offline development but wasn't required — cloud K8s + delegate is closer to the enterprise deployment pattern anyway.
 
 ---
 
@@ -469,6 +487,146 @@ Ship the CI-based demo now (it works, it's testable, it's fast). Talk about CDT 
 
 ---
 
+## Section 18 — Node.js 20 → 22 required for modern sf CLI (undici transitively needs `webidl.util.markAsUncloneable`)
+
+### The finding
+
+First pipeline run against the delegate failed at the Authenticate Validation Org step (AFTER install-salesforce-cli.sh had successfully installed sf CLI 2.143.6 to the workspace):
+
+```
+TypeError: webidl.util.markAsUncloneable is not a function
+    at new CacheStorage (undici/lib/web/cache/cachestorage.js:20:17)
+```
+
+### Root cause
+
+Modern `@salesforce/cli` transitively depends on `undici`, which requires Node.js 22's `webidl.util.markAsUncloneable` API. Our pipeline steps ran in `node:20-slim` base image — the API doesn't exist there.
+
+### Fix
+
+Bumped the base image `node:20-slim` → `node:22-slim` across every Run step in both Salesforce pipelines (16 replacements in the governed-release YAML + 5 in the feature-package-deploy YAML). Node 22 is LTS as of 2024-10; safe pin.
+
+### Production version
+
+Bake a custom image (`joenormous/harness-sf-runner:v1`) with `sf` CLI + Node 22 + any other needed tools pre-installed, pin the pipeline to that image tag. Eliminates the ~60s-per-step sf CLI install AND locks the Node+CLI version together atomically, preventing this class of drift.
+
+### Interview relevance
+
+Container image pinning surfaces dependency issues that don't manifest on developer laptops (which run whatever `nvm` selected). **Pipeline images are best pinned at a specific *custom-baked* tag, not a base image tag** — because base image versions still drift underneath you every time the pipeline runs (`node:22-slim` is a moving tag, `node:22.13.1-slim` is not; a custom-built `joenormous/harness-sf-runner:v1` is even more locked).
+
+---
+
+## Section 19 — Kubernetes CI stages run each step in a separate container (`npm install -g` doesn't persist)
+
+### The finding
+
+Original `install-salesforce-cli.sh` did `npm install --global @salesforce/cli`. That worked on `runtime.type: Cloud` (all steps run on the same VM, share `/usr/bin` and `/usr/local/lib/node_modules`). On `KubernetesDirect` infrastructure, it silently failed to persist across steps: step 1 successfully installed sf CLI, step 2 got "sf: command not found".
+
+### Root cause
+
+In Harness Kubernetes CI stages, all steps run in the same pod but each step is a separate CONTAINER. The workspace volume (`/harness`) is shared across all steps via a mount; anything installed OUTSIDE that volume — like a global npm install into `/usr/local/lib/node_modules` — is scoped to that single container and doesn't persist to the next step's fresh container.
+
+### Fix
+
+Rewrote `scripts/install-salesforce-cli.sh` to install sf CLI *into the workspace*:
+
+```bash
+mkdir -p "$SF_CLI_HOME"  # $PWD/sf-cli
+cd "$SF_CLI_HOME"
+npm install --no-audit --no-fund "@salesforce/cli@${SF_CLI_VERSION}"
+# ...writes sf-cli.env to workspace root with the PATH export
+cat > "$WORKSPACE_ROOT/sf-cli.env" <<EOF
+export PATH="$SF_CLI_HOME/node_modules/.bin:\$PATH"
+EOF
+```
+
+Every downstream Run step in the pipeline starts its command with `source sf-cli.env`. That prepends the workspace-installed sf CLI to PATH, making `sf` resolve.
+
+### Interview relevance
+
+**Two-layer isolation model to know cold**: pods share workspace volume; containers within a pod don't share anything else. This is a well-known Kubernetes concept but bites CI users specifically because *most* CI systems (GitHub Actions, GitLab CI, Circle, Cloud Build) run all steps in the same container. Harness Kubernetes CI is different — closer to Tekton's Task+Step model — because it maximizes step-level image flexibility (one step can use `alpine:3.20`, another `node:22-slim`, another `python:3.11-slim`) at the cost of losing implicit sharing of installed tools.
+
+### Product observation
+
+Harness CI docs should call this out prominently. The docs currently emphasize per-step image flexibility as a feature (correctly), but don't warn about the persistence trap. Every customer coming from a single-container CI system will hit this within their first day.
+
+---
+
+## Section 20 — GKE Pod Security admission requires numeric UID, not named user, to verify `runAsNonRoot`
+
+### The finding
+
+The DevOpsForce Site pipeline's Deploy stage failed steady-state check with the same error, hundreds of times per rollout attempt:
+
+```
+Error: container has runAsNonRoot and image has non-numeric user
+(nginx), cannot verify user is non-root
+```
+
+Blue deployment pods created, image pulled successfully, then rejected at admission time by K8s. `progress deadline exceeded` on the deployment; rollback swap-back triggered by `failureStrategies`.
+
+### Root cause
+
+GKE Pod Security admission checks `runAsNonRoot: true` by inspecting the container image's declared user. The base image `nginxinc/nginx-unprivileged:1.27-alpine` runs as the *named* user "nginx", which under the hood maps to UID 101 — but K8s admission has no way to resolve the string "nginx" to a UID without running the container. So it plays safe and rejects.
+
+The pod template's `securityContext` had `runAsNonRoot: true` but no `runAsUser`. Setting `runAsUser` explicitly with a number tells admission the numeric UID up front, without needing to inspect the image.
+
+### Fix
+
+Added 4 lines to the pod template's `securityContext`:
+
+```yaml
+securityContext:
+  runAsNonRoot: true
+  runAsUser: 101   # matches nginx-unprivileged's internal UID
+  runAsGroup: 101
+```
+
+### Sub-finding: the fix was in the local working copy, but never pushed to the actual git repo Harness was building from
+
+This one surprised me. My local `devopsforce-site/` folder had the correct `deployment.yaml` with all four lines. Every pipeline run kept using the OLD deployment manifest. Root cause: `devopsforce-site/` in the Harness (Salesforce) repo working directory was untracked — the folder was a local scratchpad copy, NOT the actual `joenormousman/DevOpsForce` repo that Harness's pipeline pulls from. I'd been editing files in the wrong place all along.
+
+Cloned `joenormousman/DevOpsForce`, diffed against the local scratch copy (only the deployment.yaml was actually different), copied the fix over, committed and pushed to the real repo (commit `31633c5`). Next pipeline run went green.
+
+### Interview relevance
+
+Two lessons here worth naming out loud:
+
+1. **`runAsNonRoot` and image UID metadata are two different systems.** The image can genuinely be non-root at runtime while still failing admission. Explicit numeric UIDs in the pod spec are the belt-and-suspenders fix that always works.
+2. **"The fix is on disk but the pipeline doesn't see it" is one of the most common real-world CI/CD failure modes.** It's usually because the working copy someone's editing isn't the git repo the pipeline actually pulls from — a subtle failure that takes a `git status` in the right directory to catch. In this case, `devopsforce-site/` in the wrong repo's working tree looked authoritative but wasn't tracked anywhere.
+
+---
+
+## Section 21 — Pipeline "Inline" vs "Repository" code source (git storage) is a first-day governance decision
+
+### The finding
+
+Harness pipelines have two storage models:
+
+- **Inline** — YAML lives in Harness's own database; editing the pipeline in the UI saves server-side. No git involved.
+- **Repository** — YAML lives at `.harness/pipeline.yaml` (or similar) in an external git repo. Editing writes to git; opening reads from git.
+
+The Harness lab tutorial defaults to Inline. Every pipeline created via "Create new Pipeline" without explicit "Import from Git" ends up Inline. Our DevOpsForce Site pipeline is Inline; our Salesforce pipelines are Repository (stored in `joenormousman/Harness` at `.harness/*.yaml`).
+
+### Tradeoffs
+
+| | Inline | Repository |
+|---|---|---|
+| Setup | Fastest (no connector needed for authoring) | Need a git connector first |
+| Iteration | Fast (server-side save) | Slower (git round-trip) |
+| Git blame / history | None | Full |
+| PR review of pipeline changes | Impossible | Standard git PR flow |
+| Cross-account portability | Locked to one account | Same YAML in any account |
+| Multi-branch pipeline testing | Impossible | Feature-branch a pipeline change |
+| Backup / recovery | Trusts Harness DB backups | Trusts git |
+| Auditor-friendly | Only Harness activity logs | Commit signatures + git blame |
+
+### Interview relevance
+
+For any customer engagement, **Repository storage is the correct posture on day one** — same argument as Terraform vs. click-ops. The lab tutorial's Inline default is fine for learning; it's not fine for anything that persists past the demo. Migration cost is small (Pipeline Settings → Move to Git in Harness). Worth calling out to customers early because the migration cost grows with pipeline complexity.
+
+---
+
 ## Appendix — Chronological decision log
 
 Compressed timeline of decisions and pivots during the build.
@@ -483,10 +641,17 @@ Compressed timeline of decisions and pivots during the build.
 | Wed morning | Pivoted from Connected Apps to External Client Apps | Modern SF UI blocks Connected App creation (Section 1) |
 | Wed morning | Made `connectorRef` a runtime input | Harness silently downscoped the connector (Section 5) |
 | Wed morning | Deleted existing pipeline YAML from git to unblock Save | Create-new-Pipeline flow collided with existing file (Section 7) |
-| Wed midday | Skipped live pipeline execution | Harness Free tier requires sales contact for Cloud VM (Section 4) |
-| Wed afternoon | Doubled down on artifact polish over live run | Dep-resolver + architecture doc + product brief win the interview more than a green pipeline check |
-| Thu (planned) | Import second pipeline into Harness UI, record demo video, prep CI-vs-CDT talking point | Interview polish |
-| Thu stretch | Attempt Oracle Cloud VM + self-hosted delegate | Only if all other Thursday work wraps early |
+| Wed midday | Skipped live SF pipeline execution against Cloud runtime | Harness Free tier requires sales contact for Cloud VM (Section 4) |
+| Wed afternoon | Doubled down on artifact polish over live SF pipeline run | Dep-resolver + architecture doc + product brief win the interview more than a green SF pipeline check |
+| Thu morning | Discovered existing `gke_devopsforce` delegate on GKE cluster from prior lab work | Unlocked pipeline execution without touching BIOS or paying for Cloud VMs (Section 4, Section 10 update) |
+| Thu morning | Retargeted both SF pipelines to `KubernetesDirect` on the delegate | Uses same infrastructure DevOpsForce Site was already running on |
+| Thu midday | Rewrote install-salesforce-cli.sh for workspace-install pattern | K8s CI runs each step in separate container; global npm installs don't persist (Section 19) |
+| Thu midday | Bumped pipeline base image `node:20-slim` → `node:22-slim` | Modern sf CLI's undici dep needs Node 22 API (Section 18) |
+| Thu afternoon | Fixed DevOpsForce Site deployment.yaml with `runAsUser: 101` — pushed to actual DevOpsForce repo | Local fix was in wrong repo; pipeline was still pulling old manifest (Section 20) |
+| Thu afternoon | Regenerated JWT cert v2 + added public-key SHA256 fingerprint diagnostics to auth script | Prior cert failed with `invalid_assertion`; couldn't rule out cert/key mismatch without diagnostics |
+| Thu afternoon | Deferred SF pipeline cert propagation (~15 min work) | Better ROI on interview cheat sheet + talk track polish given Fri interview |
+| Thu afternoon | DevOpsForce Site pipeline green end-to-end | Lab items 1-4 satisfied; bonus item 5 satisfied by existing `K8s_HTTP_Health_Check` template already in use |
+| Thu evening | Wrote interview cheat sheet, rewrote talk track, revised findings/runbook/brief | Fri interview readiness |
 
 ---
 
@@ -496,6 +661,9 @@ Compressed timeline of decisions and pivots during the build.
 - **Start with the dep-resolver, not the pipeline.** The dep-resolver is the interview differentiator. Building the 5-stage pipeline first was a sunk cost — the incumbents already do all of that. Building novel work first would have given more time to polish it.
 - **Test the pipeline auth locally before wiring Harness.** The `docs/connected-app-setup.md` local sanity test would have caught the `login.salesforce.com` vs `test.salesforce.com` issue 20 minutes into setup instead of finding it during first pipeline run.
 - **Assume Harness Free tier is production-toy tier.** Check the actual feature gates on Day 1, not Day 3. Would have discovered the Cloud VM CC gate before committing to Harness Cloud runtime.
+- **Bake a custom pipeline base image on day 1.** `joenormous/harness-sf-runner:v1` with sf CLI + Node 22 + Python 3 pre-installed. Saves 60s per stage on every future run AND prevents the Node-version drift class of bug (Section 18). Also lets me pin `sf` + Node + Python versions atomically as one image tag.
+- **Verify which git repo the pipeline actually pulls from before editing anything.** The DevOpsForce fix took an extra round-trip because I was editing files in a local scratchpad that wasn't tracked in the pipeline's actual source repo (Section 20 sub-finding). One `git remote -v` at the start would have saved 20 minutes of "why doesn't the fix take."
+- **Choose Repository (git-stored) pipelines from day one for anything past the tutorial.** Inline pipelines are fine for lab exercises; they're not fine for anything a customer will inherit or audit (Section 21).
 
 ---
 
@@ -507,7 +675,10 @@ Ranked by hours-saved-per-hour-of-Harness-eng-work:
 2. **First-class Salesforce Connected/External Client App setup wizard in the Harness UI.** ~2 hours of my life. Also unblocks admin-developer adoption at customer sites — huge cross-sell surface.
 3. **A "Salesforce Metadata Package" resource type** (first-class dep-graph aware). Weeks-to-months of work; multi-year cross-sell revenue.
 4. **Clearer connector scope UX** — the URL Type vs Connector Scope terminology overloading (Section 5). Small fix, high leverage.
-5. **Import-from-Git flow distinct from Create-new-Pipeline flow.** Just a UI change. High confusion cost today.
+5. **Import-from-Git flow distinct from Create-new-Pipeline flow.** Just a UI change. High confusion cost today (Section 7).
+6. **Docs page on K8s CI's per-step-container model + workspace-install pattern.** Every customer coming from GitHub Actions / GitLab / Circle CI will hit the "tools installed in step 1 aren't in step 2" trap (Section 19). One good docs page prevents the problem entirely.
+7. **Pipeline base-image recommendations for common stacks (Salesforce, Terraform, .NET, etc.).** Right now customers reinvent per-step base images and hit version drift like the Node 20 vs 22 issue (Section 18). A small `harness/base-images` GitHub org with maintained tags would cover this.
+8. **A `runbook` / `field guide` doc series** written for the "just discovered the delegate model can bypass Cloud runtime CC gate" moment — because right now delegate setup reads as an advanced-user path in the tutorials when it's actually the *only* self-serve path for real pipeline execution today.
 
 ## What Salesforce could ship that would help
 

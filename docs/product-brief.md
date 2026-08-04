@@ -21,14 +21,16 @@ Two capabilities Harness has natively that the incumbents either don't have or b
 
 ## What the demo repo shows
 
-Built against a fresh Harness Free-tier account and two Salesforce Developer Editions in the week before this interview:
+Built against a Harness Free-tier account with a GKE cluster + self-hosted Delegate and two Salesforce Developer Editions in the week before this interview:
 
-| Artifact | What it proves |
-|---|---|
-| **Salesforce DX Governed Release** pipeline (5 stages) | I know the enterprise release pattern — validate → sandbox → validate prod → approval → quick-deploy — end to end, wired to real Harness secrets and JWT-authenticated Salesforce Connected/External Client Apps |
-| **Salesforce Feature Package Deploy** pipeline (dep-resolver) | I built the missing intelligence layer as a Harness pipeline stage — the same Gearset "comparison and deploy" pattern surfaced natively in Harness |
-| **`docs/dep-resolver-architecture.md`** | I know what a real dependency engine costs (8-10 engineer-months for v1, 12-18 months for parity), what shortcuts are safe, and what the roadmap looks like |
-| **`docs/pipeline-setup-runbook.md`** | I write customer-facing implementation runbooks, not just code |
+| Artifact | State today | What it proves |
+|---|---|---|
+| **DevOpsForce Site** pipeline (Build + Blue/Green Deploy) | **Green, running end-to-end** | I can execute Harness's Kubernetes CI/CD pattern — Docker build+push to DockerHub, blue/green deploy to GKE, health-checked traffic cutover, atomic rollback. Deploys a real marketing landing page that carries the exact product thesis in this brief |
+| **`K8s_HTTP_Health_Check` v1 step template** (in use in DevOpsForce Site) | **Live** | I understand pipeline templatization — the lab bonus item is already shipping, not invented for the interview |
+| **Salesforce DX Governed Release** pipeline (5 stages) | Imported to Harness, retargeted to delegate; JWT auth requires 15 min of cert-propagation setup to run live | I know the enterprise Salesforce release pattern — validate → sandbox → validate prod → approval → quick-deploy — end to end, wired to real Harness secrets and JWT-authenticated External Client Apps |
+| **Salesforce Feature Package Deploy** pipeline (dep-resolver as a Harness stage) | YAML committed; **dep-resolver script runs locally against real metadata** | The dep-resolver expands a 1-item seed to a 5-item resolved set with a rationale trail — the same intelligence layer Gearset/Copado/Flosum charge enterprise-tier prices for, surfaced natively in a Harness pipeline stage |
+| **`docs/dep-resolver-architecture.md`** | Written | I know what a real dependency engine costs (8-10 engineer-months for v1, 12-18 months for parity), what shortcuts are safe, and what the 5-phase Harness product roadmap looks like |
+| **`docs/pipeline-setup-runbook.md`** + **`docs/pipeline-build-findings.md`** | Written | I write customer-facing implementation runbooks AND honest post-mortem findings, not just code |
 
 ## What I'd propose Harness ship
 
