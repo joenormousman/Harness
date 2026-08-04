@@ -16,9 +16,12 @@ pipeline:
   properties:
     ci:
       codebase:
-        connectorRef: <+input>
-        repoName: <+input>
-        build: <+input>
+        connectorRef: account.GitHub
+        repoName: Harness
+        build:
+          type: branch
+          spec:
+            branch: main
   variables:
     - name: sourceDir
       type: String
@@ -70,12 +73,14 @@ pipeline:
         type: CI
         spec:
           cloneCodebase: true
-          platform:
-            os: Linux
-            arch: Amd64
-          runtime:
-            type: Cloud
-            spec: {}
+          infrastructure:
+            type: KubernetesDirect
+            spec:
+              connectorRef: gke_devopsforce
+              namespace: harness-build
+              automountServiceAccountToken: true
+              nodeSelector: {}
+              os: Linux
           execution:
             steps:
               - step:
@@ -83,24 +88,28 @@ pipeline:
                   name: Install Salesforce CLI
                   identifier: Install_Salesforce_CLI
                   spec:
+                    connectorRef: DockerHub
+                    image: node:20-slim
                     shell: Bash
                     envVariables:
                       SF_CLI_VERSION: <+pipeline.variables.sfCliVersion>
-                    command: |-
-                      bash scripts/install-salesforce-cli.sh
+                    command: bash scripts/install-salesforce-cli.sh
               - step:
                   type: Run
                   name: Check Salesforce Project
                   identifier: Check_Salesforce_Project
                   spec:
+                    connectorRef: DockerHub
+                    image: node:20-slim
                     shell: Bash
-                    command: |-
-                      node scripts/check-salesforce-project.mjs
+                    command: node scripts/check-salesforce-project.mjs
               - step:
                   type: Run
                   name: Authenticate Target Org
                   identifier: Auth_Target_Org
                   spec:
+                    connectorRef: DockerHub
+                    image: node:20-slim
                     shell: Bash
                     envVariables:
                       SF_CLIENT_ID: <+secrets.getValue("sf_sandbox_client_id")>
@@ -109,12 +118,15 @@ pipeline:
                       SF_INSTANCE_URL: <+pipeline.variables.targetInstanceUrl>
                       SF_ORG_ALIAS: feature-target
                     command: |-
+                      source sf-cli.env
                       bash scripts/auth-salesforce-jwt.sh
               - step:
                   type: Run
                   name: Resolve Dependency Graph
                   identifier: Resolve_Dependency_Graph
                   spec:
+                    connectorRef: DockerHub
+                    image: python:3.11-slim
                     shell: Bash
                     envVariables:
                       SOURCE_DIR: <+pipeline.variables.sourceDir>
@@ -144,6 +156,8 @@ pipeline:
                   name: Deploy Resolved Package
                   identifier: Deploy_Resolved_Package
                   spec:
+                    connectorRef: DockerHub
+                    image: node:20-slim
                     shell: Bash
                     envVariables:
                       TARGET_ORG: feature-target
@@ -152,17 +166,21 @@ pipeline:
                       WAIT_MINUTES: "60"
                       DEPLOY_MODE: standard
                     command: |-
+                      source sf-cli.env
                       bash scripts/deploy-metadata.sh
               - step:
                   type: Run
                   name: Run Apex Smoke Test
                   identifier: Run_Apex_Smoke_Test
                   spec:
+                    connectorRef: DockerHub
+                    image: node:20-slim
                     shell: Bash
                     envVariables:
                       TARGET_ORG: feature-target
                       TEST_CLASS: HarnessReleaseHealthTest
                       WAIT_MINUTES: "20"
                     command: |-
+                      source sf-cli.env
                       bash scripts/run-apex-smoke-test.sh
         tags: {}
