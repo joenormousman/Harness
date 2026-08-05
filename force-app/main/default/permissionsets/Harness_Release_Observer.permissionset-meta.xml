@@ -6,11 +6,6 @@
     </classAccesses>
     <description>Grants read access to the release health check and the Release Signal object used by the Harness Salesforce demo.</description>
     <fieldPermissions>
-        <editable>true</editable>
-        <field>Release_Signal__c.Status__c</field>
-        <readable>true</readable>
-    </fieldPermissions>
-    <fieldPermissions>
         <editable>false</editable>
         <field>Release_Signal__c.Last_Run__c</field>
         <readable>true</readable>
