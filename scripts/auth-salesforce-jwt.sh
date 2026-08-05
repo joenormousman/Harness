@@ -36,11 +36,25 @@ fi
 
 if command -v openssl >/dev/null 2>&1; then
   PUB_SHA=$(openssl pkey -in "$KEY_FILE" -pubout -outform DER 2>/dev/null | sha256sum | awk '{print $1}')
-  echo "  Derived public key SHA256: ${PUB_SHA}"
-  echo "  (This MUST match the SHA256 of the cert public key uploaded to the SF Connected App.)"
+  echo "  Derived public key SHA256 (via openssl): ${PUB_SHA}"
+elif command -v node >/dev/null 2>&1; then
+  # openssl not installed (e.g. node:22-slim). Fall back to Node's built-in crypto
+  # module to extract the DER-encoded public key and SHA256 it. Same fingerprint,
+  # different tool.
+  PUB_SHA=$(node -e "
+    const fs = require('fs');
+    const crypto = require('crypto');
+    const pemPriv = fs.readFileSync(process.argv[1], 'utf8');
+    const keyObj = crypto.createPrivateKey(pemPriv);
+    const pubDer = crypto.createPublicKey(keyObj).export({type:'spki', format:'der'});
+    console.log(crypto.createHash('sha256').update(pubDer).digest('hex'));
+  " "$KEY_FILE" 2>/dev/null)
+  echo "  Derived public key SHA256 (via node crypto): ${PUB_SHA}"
 else
-  echo "  openssl not available in this image; skipping public-key fingerprint check."
+  echo "  Neither openssl nor node available; skipping public-key fingerprint check."
 fi
+echo "  (This MUST match the SHA256 of the cert public key uploaded to the SF Connected App.)"
+echo "  Expected v2 cert fingerprint: 73e01e60203b74cef712ffd0e86bf8ccf28868366b3d584f420b1177d3fbcd53"
 echo "=== end diagnostics ==="
 echo ""
 
