@@ -23,21 +23,24 @@ sf org list --json 2>&1 | head -50 | sed 's/^/    /' || echo "    (sf org list f
 echo "=== end pre-flight ==="
 echo ""
 
-# preview: writes JSON to file, but if it fails we want to see WHY, not silently exit.
-echo "=== sf project deploy preview ==="
+# preview: informational only ("here's what would deploy"). Requires source
+# tracking, which Dev Edition orgs don't have (only scratch orgs and
+# source-tracking-enabled sandboxes). Non-blocking — if preview fails we
+# log it and move on; the actual validate below is what gates the pipeline.
+echo "=== sf project deploy preview (informational, non-blocking) ==="
 set +e
 sf project deploy preview \
   --target-org "$TARGET_ORG" \
   --source-dir "$SOURCE_DIR" \
-  --json > "$PREVIEW_PATH"
+  --json > "$PREVIEW_PATH" 2>&1
 preview_exit=$?
 set -e
 if [[ "$preview_exit" -ne 0 ]]; then
-  echo "PREVIEW FAILED with exit ${preview_exit}. JSON error follows:"
-  cat "$PREVIEW_PATH" 2>&1 | sed 's/^/  /'
-  exit "$preview_exit"
+  echo "preview skipped (exit ${preview_exit}) — this is expected on Dev Editions and other non-source-tracked orgs. Continuing to validate:"
+  cat "$PREVIEW_PATH" 2>&1 | sed 's/^/  /' | head -20
+else
+  echo "preview completed OK"
 fi
-echo "preview completed OK"
 
 set +e
 sf project deploy validate \
