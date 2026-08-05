@@ -57,12 +57,29 @@ echo "sf installed at: $SF_BIN"
 echo "sf --version:"
 "$SF_BIN" --version
 
-# Emit the PATH export that downstream steps must source.
+# Emit the env exports that downstream steps must source.
 # Writes to workspace root so `source sf-cli.env` from any step (whose
 # $PWD is the workspace root at step start) resolves correctly.
+#
+# Two things this env file does:
+# 1. PATH: adds the workspace-installed sf CLI binary to PATH.
+# 2. HOME: overrides HOME to the workspace root. This is critical for
+#    Kubernetes CI where each step runs in its own container. sf CLI
+#    stores org auth state in ~/.sf/ by default. Without a HOME override
+#    that state lives in the step's ephemeral container filesystem and
+#    is LOST when the next step's container spins up fresh — sf then
+#    doesn't know about any org and downstream commands like
+#    `sf project deploy validate --target-org validation` silently
+#    exit because the aliased org doesn't exist in the fresh state.
+#    Pointing HOME at the shared workspace volume makes ~/.sf/ become
+#    $WORKSPACE_ROOT/.sf/, which persists across all steps in the stage.
+mkdir -p "$WORKSPACE_ROOT/.sf" "$WORKSPACE_ROOT/.cache"
 cat > "$WORKSPACE_ROOT/sf-cli.env" <<EOF
 export PATH="$SF_CLI_HOME/node_modules/.bin:\$PATH"
+export HOME="$WORKSPACE_ROOT"
 EOF
 
-echo "PATH export written to $WORKSPACE_ROOT/sf-cli.env"
+echo "env exports written to $WORKSPACE_ROOT/sf-cli.env"
+echo "  PATH -> $SF_CLI_HOME/node_modules/.bin prepended"
+echo "  HOME -> $WORKSPACE_ROOT (so sf CLI state at ~/.sf/ persists across step containers)"
 echo "downstream steps must: source sf-cli.env"
